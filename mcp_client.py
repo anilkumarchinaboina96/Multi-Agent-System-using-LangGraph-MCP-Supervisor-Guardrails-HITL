@@ -1,13 +1,17 @@
 import os
 import shutil
 import sys
+import logging
 from pathlib import Path
 from typing import Any
 
 import certifi
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
+
+
+logger = logging.getLogger(__name__)
 
 
 # =========================================================
@@ -29,7 +33,9 @@ AVIATION_STACK_API_KEY = (
 )
 
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2")
+OPENAI_EXTRACT_MAX_TOKENS = int(os.getenv("OPENAI_EXTRACT_MAX_TOKENS", "64"))
 
 WEATHER_SERVER_PATH = BASE_DIR / "custom_weather_mcp_server.py"
 UVX_COMMAND = shutil.which("uvx") or "uvx"
@@ -65,9 +71,10 @@ def _subprocess_env(**updates: str | None) -> dict[str, str]:
 # LLM
 # =========================================================
 
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=_require_env("GROQ_API_KEY", GROQ_API_KEY),
+llm = ChatOpenAI(
+    model=OPENAI_MODEL,
+    api_key=_require_env("OPENAI_API_KEY", OPENAI_API_KEY),
+    max_tokens=OPENAI_EXTRACT_MAX_TOKENS,
 )
 
 
@@ -217,14 +224,18 @@ async def get_all_tools() -> None:
                 or "no tools"
             )
 
-            print(
-                f"{server_name}: OK -> {tool_names}"
+            logger.info(
+                "%s: OK -> %s",
+                server_name,
+                tool_names,
             )
 
         except Exception as exc:
-            print(
-                f"{server_name}: FAILED -> "
-                f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "%s: FAILED -> %s: %s",
+                server_name,
+                type(exc).__name__,
+                exc,
             )
 
 

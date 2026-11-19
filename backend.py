@@ -1,6 +1,7 @@
 import os
 import certifi
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
 os.environ["SSL_CERT_FILE"] = certifi.where()
@@ -22,7 +23,7 @@ from langchain_core.messages import (
     AIMessage,
     SystemMessage,
 )
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 
 
 from mcp_client import (
@@ -32,6 +33,9 @@ from mcp_client import (
     forecast_mcp_search,
     weather_mcp_search,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_database_url():
@@ -50,17 +54,19 @@ def get_database_url():
     return database_url
 
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2")
 
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY is missing. Please add it to your .env file.")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY is missing. Please add it to your .env file.")
 
 # =========================
-# LLM - original model kept
+# LLM
 # =========================
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=GROQ_API_KEY,
+llm = ChatOpenAI(
+    model=OPENAI_MODEL,
+    api_key=OPENAI_API_KEY,
+    max_tokens=1000,
 )
 
 # =========================
@@ -113,8 +119,28 @@ AGENT_ORDER = [
 ]
 
 
+def _prompt_context(value: Any, max_chars: int = 1200) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+
+    marker = "\n[truncated]"
+    if len(text) > max_chars:
+        return text[: max_chars - len(marker)].rstrip() + marker
+    return text
+
+
 def _llm_text(system_prompt: str, user_prompt: str) -> str:
-    response = llm.invoke(
+    response = llm.bind(max_tokens=1000).invoke(
         [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
@@ -184,7 +210,10 @@ User request:
         guardrail_reason = str(guardrail_result.get("reason", "")).strip()
         llm_calls += 1
     except Exception as exc:
-        print(f"Guardrail fallback used: {exc}")
+        logger.warning(
+            "Guardrail fallback used due to parsing/model error: %s",
+            exc,
+        )
         allowed = True
         guardrail_reason = "Guardrail validation fallback allowed the request."
 
@@ -258,7 +287,10 @@ User request:
         reasoning = str(parsed.get("reasoning", "")).strip()
         llm_calls += 1
     except Exception as exc:
-        print(f"Supervisor fallback used: {exc}")
+        logger.warning(
+            "Supervisor fallback used due to parsing/model error: %s",
+            exc,
+        )
         # Original workflow behavior is preserved as the fallback.
         selected_agents = AGENT_ORDER.copy()
         constraints = _empty_constraints()
@@ -320,20 +352,20 @@ Return concise travel guidance.
 
 
 def flight_agent(state: TravelState):
-    print("\nINSIDE FLIGHT AGENT\n")
+    logger.info("Running flight agent")
     query = state["user_query"]
 
     try:
         airports = asyncio.run(aviation_mcp_call("list_airports"))
         airlines = asyncio.run(aviation_mcp_call("list_airlines"))
 
-        print("\nAIRPORTS:", airports)
-        print("\nAIRLINES:", airlines)
+        logger.debug("Flight agent airports payload: %s", airports)
+        logger.debug("Flight agent airlines payload: %s", airlines)
 
         prompt = FLIGHT_AGENT_PROMPT.format(
             query=query,
-            airport_data=str(airports)[:3000],
-            airline_data=str(airlines)[:3000],
+            airport_data=_prompt_context(airports, 1000),
+            airline_data=_prompt_context(airlines, 1000),
         )
 
         response = llm.invoke(
@@ -344,6 +376,7 @@ def flight_agent(state: TravelState):
         )
         flight_data = response.content
     except Exception as exc:
+        logger.warning("Flight agent fallback due to tool/model error: %s", exc)
         flight_data = f"Flight information unavailable: {exc}"
 
     return {
@@ -368,10 +401,10 @@ def hotel_agent(state: TravelState):
         )
 
     except Exception as exc:
-        print(
-            f"HOTEL AGENT MCP ERROR: "
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
+        logger.warning(
+            "Hotel agent MCP error: %s: %s",
+            type(exc).__name__,
+            exc,
         )
 
         hotel_results = (
@@ -380,6 +413,8 @@ def hotel_agent(state: TravelState):
             "guidance based on the destination and clearly "
             "label it as non-live advice."
         )
+
+    hotel_results = _prompt_context(hotel_results, 1500)
 
     return {
         "hotel_results": hotel_results,
@@ -420,10 +455,10 @@ Forecast:
 """
 
     except Exception as exc:
-        print(
-            f"WEATHER AGENT MCP ERROR: "
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
+        logger.warning(
+            "Weather agent MCP error: %s: %s",
+            type(exc).__name__,
+            exc,
         )
 
         weather_results = (
@@ -454,16 +489,16 @@ User Query:
 {state['user_query']}
 
 Trip Constraints:
-{state.get('trip_constraints', {})}
+{_prompt_context(state.get('trip_constraints', {}), 800)}
 
 Flight Results:
-{state.get('flight_results', '')}
+{_prompt_context(state.get('flight_results', ''))}
 
 Hotel Results:
-{state.get('hotel_results', '')}
+{_prompt_context(state.get('hotel_results', ''))}
 
 Weather Results:
-{state.get('weather_results', '')}
+{_prompt_context(state.get('weather_results', ''))}
 
 Return:
 1. Estimated cost categories
@@ -499,19 +534,19 @@ User Query:
 {state['user_query']}
 
 Trip Constraints:
-{state.get('trip_constraints', {})}
+{_prompt_context(state.get('trip_constraints', {}), 800)}
 
 Flight Results:
-{state.get('flight_results', '')}
+{_prompt_context(state.get('flight_results', ''))}
 
 Hotel Results:
-{state.get('hotel_results', '')}
+{_prompt_context(state.get('hotel_results', ''))}
 
 Weather Results:
-{state.get('weather_results', '')}
+{_prompt_context(state.get('weather_results', ''))}
 
 Budget Results:
-{state.get('budget_results', '')}
+{_prompt_context(state.get('budget_results', ''))}
 
 Make the itinerary practical, budget-aware, and easy to follow.
 Create a clear draft that is ready for human review.
@@ -590,22 +625,22 @@ User Request:
 {state['user_query']}
 
 Supervisor Constraints:
-{state.get('trip_constraints', {})}
+{_prompt_context(state.get('trip_constraints', {}), 800)}
 
 Flights:
-{state.get('flight_results', '')}
+{_prompt_context(state.get('flight_results', ''))}
 
 Hotels:
-{state.get('hotel_results', '')}
+{_prompt_context(state.get('hotel_results', ''))}
 
 Weather:
-{state.get('weather_results', '')}
+{_prompt_context(state.get('weather_results', ''))}
 
 Budget Analysis:
-{state.get('budget_results', '')}
+{_prompt_context(state.get('budget_results', ''))}
 
 Draft Itinerary:
-{state.get('itinerary', '')}
+{_prompt_context(state.get('itinerary', ''))}
 
 Format the final answer beautifully using these sections:
 1. Trip Summary

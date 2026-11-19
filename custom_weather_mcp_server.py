@@ -5,6 +5,8 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -16,7 +18,35 @@ OPENWEATHER_API_KEY = os.getenv(
     "OPENWEATHER_API_KEY"
 )
 
-REQUEST_TIMEOUT_SECONDS = 20
+WEATHER_API_BASE_URL = "https://api.openweathermap.org/data/2.5"
+REQUEST_TIMEOUT_SECONDS = int(
+    os.getenv("OPENWEATHER_TIMEOUT_SECONDS", "20")
+)
+REQUEST_MAX_RETRIES = int(
+    os.getenv("OPENWEATHER_MAX_RETRIES", "2")
+)
+
+
+def _build_session() -> requests.Session:
+    retry = Retry(
+        total=REQUEST_MAX_RETRIES,
+        connect=REQUEST_MAX_RETRIES,
+        read=REQUEST_MAX_RETRIES,
+        status=REQUEST_MAX_RETRIES,
+        backoff_factor=0.5,
+        allowed_methods=frozenset({"GET"}),
+        status_forcelist=(429, 500, 502, 503, 504),
+        raise_on_status=False,
+    )
+
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+HTTP_SESSION = _build_session()
 
 
 def _get_api_key() -> str:
@@ -29,12 +59,34 @@ def _get_api_key() -> str:
     return OPENWEATHER_API_KEY
 
 
+def _validate_city(city: str) -> str:
+    normalized = city.strip()
+
+    if not normalized:
+        raise ValueError("city cannot be empty")
+
+    if len(normalized) > 120:
+        raise ValueError("city is too long; use a concise city name")
+
+    return normalized
+
+
+def _safe_response_snippet(response: requests.Response | None) -> str:
+    if response is None:
+        return ""
+
+    body = response.text[:500].replace("\n", " ").strip()
+    if not body:
+        return ""
+    return f" Response: {body}"
+
+
 def _request_json(
     url: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
     try:
-        response = requests.get(
+        response = HTTP_SESSION.get(
             url,
             params=params,
             timeout=REQUEST_TIMEOUT_SECONDS,
@@ -42,26 +94,48 @@ def _request_json(
 
         response.raise_for_status()
 
-        return response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                "OpenWeather returned non-JSON data."
+            ) from exc
 
-    except requests.RequestException as exc:
-        details = ""
-
-        failed_response = getattr(
-            exc,
-            "response",
-            None,
-        )
-
-        if failed_response is not None:
-            details = (
-                f" Response: "
-                f"{failed_response.text[:500]}"
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                "OpenWeather response shape is invalid."
             )
 
+        return payload
+
+    except requests.Timeout as exc:
         raise RuntimeError(
-            f"OpenWeather request failed: "
-            f"{exc}.{details}"
+            "OpenWeather request timed out. "
+            "Please retry."
+        ) from exc
+
+    except requests.ConnectionError as exc:
+        raise RuntimeError(
+            "OpenWeather service is unreachable. "
+            "Please check network connectivity."
+        ) from exc
+
+    except requests.HTTPError as exc:
+        details = _safe_response_snippet(
+            getattr(exc, "response", None)
+        )
+
+        raise RuntimeError(
+            f"OpenWeather request failed: {exc}.{details}"
+        ) from exc
+
+    except requests.RequestException as exc:
+        details = _safe_response_snippet(
+            getattr(exc, "response", None)
+        )
+
+        raise RuntimeError(
+            f"OpenWeather request failed: {exc}.{details}"
         ) from exc
 
 
@@ -71,15 +145,10 @@ def get_current_weather(
 ) -> dict[str, Any]:
     """Return the current weather for a city."""
 
-    city = city.strip()
-
-    if not city:
-        raise ValueError(
-            "city cannot be empty"
-        )
+    city = _validate_city(city)
 
     data = _request_json(
-        "https://api.openweathermap.org/data/2.5/weather",
+        f"{WEATHER_API_BASE_URL}/weather",
         {
             "q": city,
             "appid": _get_api_key(),
@@ -87,13 +156,24 @@ def get_current_weather(
         },
     )
 
+    try:
+        weather_items = data["weather"]
+        first_weather = weather_items[0]
+        main = data["main"]
+        wind = data["wind"]
+        city_name = data["name"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(
+            "OpenWeather current weather payload is incomplete."
+        ) from exc
+
     return {
-        "city": data["name"],
-        "temperature_c": data["main"]["temp"],
-        "feels_like_c": data["main"]["feels_like"],
-        "humidity": data["main"]["humidity"],
-        "condition": data["weather"][0]["description"],
-        "wind_speed": data["wind"]["speed"],
+        "city": city_name,
+        "temperature_c": main["temp"],
+        "feels_like_c": main["feels_like"],
+        "humidity": main["humidity"],
+        "condition": first_weather["description"],
+        "wind_speed": wind["speed"],
     }
 
 
@@ -106,15 +186,10 @@ def get_forecast(
     forecast entries for a city.
     """
 
-    city = city.strip()
-
-    if not city:
-        raise ValueError(
-            "city cannot be empty"
-        )
+    city = _validate_city(city)
 
     data = _request_json(
-        "https://api.openweathermap.org/data/2.5/forecast",
+        f"{WEATHER_API_BASE_URL}/forecast",
         {
             "q": city,
             "appid": _get_api_key(),
@@ -122,13 +197,19 @@ def get_forecast(
         },
     )
 
+    entries = data.get("list", [])
+    if not isinstance(entries, list):
+        raise RuntimeError(
+            "OpenWeather forecast payload is invalid."
+        )
+
     forecast = [
         {
             "datetime": item["dt_txt"],
             "temperature_c": item["main"]["temp"],
             "condition": item["weather"][0]["description"],
         }
-        for item in data.get("list", [])[:5]
+        for item in entries[:5]
     ]
 
     return {

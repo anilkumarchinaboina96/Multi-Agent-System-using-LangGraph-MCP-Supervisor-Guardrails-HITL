@@ -1,5 +1,8 @@
 from pathlib import Path
-import traceback
+from collections import defaultdict
+import logging
+import time
+import uuid
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -15,6 +18,17 @@ from backend import run_travel_agent, resume_travel_agent
 import nest_asyncio
 
 nest_asyncio.apply()
+
+
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format=(
+            "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+        ),
+    )
+
+logger = logging.getLogger("tripmate.api")
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -36,6 +50,19 @@ app.mount(
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
+REQUEST_METRICS: dict[str, object] = {
+    "requests_total": 0,
+    "errors_total": 0,
+    "by_path": defaultdict(
+        lambda: {
+            "count": 0,
+            "errors": 0,
+            "total_duration_ms": 0.0,
+        }
+    ),
+}
+
+
 class TravelRequest(BaseModel):
     message: str
     thread_id: str | None = None
@@ -45,6 +72,66 @@ class ApprovalRequest(BaseModel):
     thread_id: str = Field(min_length=1)
     approved: bool
     feedback: str = ""
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    request.state.request_id = request_id
+
+    start = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - start) * 1000
+        path_metrics = REQUEST_METRICS["by_path"][request.url.path]
+        path_metrics["count"] += 1
+        path_metrics["errors"] += 1
+        path_metrics["total_duration_ms"] += duration_ms
+        REQUEST_METRICS["requests_total"] += 1
+        REQUEST_METRICS["errors_total"] += 1
+
+        logger.exception(
+            "Unhandled request error request_id=%s method=%s path=%s duration_ms=%.2f",
+            request_id,
+            request.method,
+            request.url.path,
+            duration_ms,
+        )
+
+        response = JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": "Internal server error.",
+                "request_id": request_id,
+            },
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    path_metrics = REQUEST_METRICS["by_path"][request.url.path]
+    path_metrics["count"] += 1
+    path_metrics["total_duration_ms"] += duration_ms
+    REQUEST_METRICS["requests_total"] += 1
+
+    if response.status_code >= 500:
+        path_metrics["errors"] += 1
+        REQUEST_METRICS["errors_total"] += 1
+
+    logger.info(
+        "request_id=%s method=%s path=%s status=%d duration_ms=%.2f",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -57,7 +144,7 @@ async def home(request: Request):
 
 
 @app.post("/api/travel")
-async def travel_planner(request_data: TravelRequest):
+async def travel_planner(request: Request, request_data: TravelRequest):
     try:
         user_message = request_data.message.strip()
 
@@ -83,20 +170,24 @@ async def travel_planner(request_data: TravelRequest):
         )
 
     except Exception as exc:
-        print("ERROR:", exc)
-        traceback.print_exc()
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.exception(
+            "Travel planner failed request_id=%s",
+            request_id,
+        )
 
         return JSONResponse(
             status_code=500,
             content={
                 "success": False,
-                "error": str(exc),
+                "error": "Internal server error.",
+                "request_id": request_id,
             },
         )
 
 
 @app.post("/api/travel/approve")
-async def approve_travel_plan(request_data: ApprovalRequest):
+async def approve_travel_plan(request: Request, request_data: ApprovalRequest):
     try:
         if not request_data.approved and not request_data.feedback.strip():
             return JSONResponse(
@@ -121,14 +212,18 @@ async def approve_travel_plan(request_data: ApprovalRequest):
         )
 
     except Exception as exc:
-        print("APPROVAL ERROR:", exc)
-        traceback.print_exc()
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.exception(
+            "Approval flow failed request_id=%s",
+            request_id,
+        )
 
         return JSONResponse(
             status_code=500,
             content={
                 "success": False,
-                "error": str(exc),
+                "error": "Internal server error.",
+                "request_id": request_id,
             },
         )
 
@@ -143,6 +238,27 @@ async def health_check():
             "input_guardrail",
             "human_in_the_loop",
         ],
+    }
+
+
+@app.get("/metrics")
+async def metrics():
+    per_path: dict[str, dict[str, float | int]] = {}
+
+    for path, values in REQUEST_METRICS["by_path"].items():
+        count = values["count"]
+        total_duration_ms = values["total_duration_ms"]
+        average_ms = (total_duration_ms / count) if count else 0.0
+        per_path[path] = {
+            "count": count,
+            "errors": values["errors"],
+            "avg_duration_ms": round(average_ms, 2),
+        }
+
+    return {
+        "requests_total": REQUEST_METRICS["requests_total"],
+        "errors_total": REQUEST_METRICS["errors_total"],
+        "paths": per_path,
     }
 
 

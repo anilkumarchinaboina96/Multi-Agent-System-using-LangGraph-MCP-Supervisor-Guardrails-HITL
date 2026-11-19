@@ -1,87 +1,130 @@
-# Multi-Agent-System-using-LangGraph-MCP-Supervisor-Guardrails-HITL
+# ✈️ AI Travel Planning Agent (LangGraph + MCP + HITL)
 
-A demo multi-agent system that uses LangGraph and MCP to implement a travel-planning assistant with a Supervisor, input Guardrails, and Human-In-The-Loop (HITL) approval flows. The project includes a FastAPI frontend, example MCP server, and client helpers to demonstrate how agents, supervisors, and guardrails can be composed into a safe, reviewable planning pipeline.
+Build smart, reviewable travel plans with a **multi-agent workflow** powered by **LangGraph**, **MCP tools**, and **human approval**.
 
-Key ideas:
-- Multi-agent coordination using LangGraph and MCP
-- Supervisor agent to manage complex workflows
-- Input guardrails to validate user requests
-- Human-in-the-loop approval for generated plans
+This project demonstrates how to combine:
+- 🤖 Specialist agents (flight, hotel, weather, budget, itinerary)
+- 🧭 A supervisor router
+- 🛡️ Guardrails for request validation
+- 👤 Human-in-the-loop (HITL) approval before final output
 
-Contents
-- `app.py`: FastAPI web frontend and API endpoints
-- `backend.py`: core agent orchestration / travel-planner logic
-- `mcp_client.py`: client helpers to interact with the MCP server
-- `custom_weather_mcp_server.py`: example MCP server for weather checks
-- `templates/`, `static/`: frontend UI assets (HTML, JS, CSS)
+---
 
-Features
-- Interactive web UI for sending travel planning prompts
-- Endpoint for drafting travel plans and separate approval endpoint
-- Example MCP server demonstrating domain adapters (weather, checkpoints)
+## 🌟 Highlights
 
-Prerequisites
-- Python 3.10+ (recommended)
-- Git (to clone the repo)
-- A virtual environment tool (venv) or similar
+- Modern FastAPI web app for interactive trip planning
+- Multi-step travel plan generation with approval flow
+- MCP integrations for external tools/services
+- Clear, structured API endpoints for frontend/backend flow
+- OpenAI-based LLM integration via LangChain
 
-Quick start (Windows)
+---
 
-1. Create and activate a virtual environment
+## 🗂️ Project Structure
+
+- `app.py` — FastAPI app and HTTP routes
+- `backend.py` — LangGraph workflow, agents, and orchestration logic
+- `mcp_client.py` — MCP client/tool integrations and helper methods
+- `custom_weather_mcp_server.py` — example MCP weather server
+- `templates/`, `static/` — frontend UI assets
+
+---
+
+## ✅ Prerequisites
+
+- Python 3.10+
+- Git
+- Virtual environment (`venv` recommended)
+
+---
+
+## ⚙️ Quick Start (Windows)
+
+1) Create and activate virtual environment
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1    # PowerShell
+.venv\Scripts\Activate.ps1
 ```
 
-2. Install dependencies
+2) Install dependencies
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-3. Run the FastAPI app (development)
+3) Run the app
 
 ```powershell
-# option A (run module)
 python app.py
+```
 
-# option B (uvicorn)
+Alternative:
+
+```powershell
 uvicorn app:app --reload --host 127.0.0.1 --port 8000
 ```
 
-4. Open the web UI
+4) Open in browser
 
-Visit http://127.0.0.1:8000 in your browser to use the TripMate frontend.
+`http://127.0.0.1:8000`
 
-Running the MCP server (example)
-- The repository includes `custom_weather_mcp_server.py` as an example MCP server. Run it in a separate terminal if you want to experiment with custom adapters used by the demo.
+---
 
-```powershell
-# start example MCP server (if needed)
-python custom_weather_mcp_server.py
-```
+## 🔌 API Endpoints
 
-API Endpoints
-- `POST /api/travel` — create or resume a travel planning thread. JSON: `{ "message": "<user prompt>", "thread_id": "optional-thread-id" }`
-- `POST /api/travel/approve` — approve or request revisions for a draft. JSON: `{ "thread_id": "<id>", "approved": true|false, "feedback": "optional" }`
-- `GET /health` — basic health check and features list
+- `POST /api/travel`
+  Start or continue a travel planning thread.
+  Payload: `{ "message": "<prompt>", "thread_id": "optional" }`
 
-Configuration & environment
-- Secrets and API keys are not included in the repo. Use environment variables or a `.env` file for any required keys consumed by `langgraph`, `langchain`, or other adapters.
+- `POST /api/travel/approve`
+  Approve or revise a draft itinerary.
+  Payload: `{ "thread_id": "<id>", "approved": true|false, "feedback": "optional" }`
 
-Development notes
-- The project keeps synchronous convenience wrappers in `backend.py` while running an async FastAPI server — `nest_asyncio` is applied in `app.py` to allow the sync helpers to call async MCP helpers.
-- Tests are not included; to experiment, interact with the web UI or call the API endpoints directly.
+- `GET /health`
+  Health status and enabled features.
 
-Contributing
-- Contributions are welcome. Please open issues or pull requests for bug fixes, documentation improvements, or new adapter examples.
+- `GET /metrics`
+  Lightweight in-process API metrics (request counts, errors, average latency by path).
 
-License
-- This repository follows the license in the `LICENSE` file.
+---
 
-Acknowledgements
-- Built as a demonstration of LangGraph + MCP patterns with supervisor and guardrail concepts.
+## 🔐 Environment Configuration
 
-Contact
-- For questions or suggestions, open an issue or contact the repository owner.
+Use a `.env` file (never commit real secrets).
+
+Required LLM settings:
+- `OPENAI_API_KEY` — OpenAI API key
+- `OPENAI_MODEL` — model name (default in code: `gpt-5.2`)
+
+Optional token/cost tuning:
+- `OPENAI_EXTRACT_MAX_TOKENS` — lightweight extraction output cap (default: `64`)
+
+Other keys (as needed by MCP/tooling in this project):
+- `TAVILY_API_KEY`
+- `AVIATIONSTACK_API_KEY` (or `AVIATION_STACK_API_KEY`)
+- `OPENWEATHER_API_KEY`
+- `DATABASE_URL`
+
+---
+
+## 🧪 Development Notes
+
+- `nest_asyncio` is applied in `app.py` so sync wrappers can call async MCP helpers.
+- The workflow is designed to pause for HITL approval and resume safely.
+- If requests are long-running, frontend timeout handling shows clear retry messages.
+- API responses include an `X-Request-ID` header for request tracing in logs.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Open an issue or submit a pull request for:
+- bug fixes
+- UX improvements
+- new MCP adapters
+- performance/cost optimizations
+
+## 🙌 Acknowledgements
+
+Built as a practical demo of **LangGraph + MCP + Guardrails + HITL** patterns for real-world agentic applications.
